@@ -141,3 +141,21 @@ export async function cancelRegistration(
 
   return body;
 }
+
+/**
+ * Verifies with the server `user_roles` table whether the current session is an admin.
+ * Does NOT cache or store the role in browser storage.
+ */
+export async function checkAdminAccess(token: string): Promise<boolean> {
+  try {
+    const response = await fetch('/api/admin/access', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+

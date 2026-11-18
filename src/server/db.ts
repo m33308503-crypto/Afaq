@@ -3,11 +3,18 @@ import path from 'path';
 
 export type EventCategory = 'workshop' | 'course' | 'event';
 export type EventStatus = 'draft' | 'published' | 'hidden';
+export type AppRole = 'admin' | 'user';
 
 export interface UserRecord {
   id: string; // User ID from Firebase Auth
   name: string;
   email: string;
+  createdAt: string;
+}
+
+export interface UserRoleRecord {
+  userId: string;
+  role: AppRole;
   createdAt: string;
 }
 
@@ -34,6 +41,9 @@ export interface RegistrationRecord {
   eventId: string;
   createdAt: string;
 }
+
+// Initial bootstrap admin email approved by the project owner
+const INITIAL_ADMIN_EMAIL = 'm33308503@gmail.com';
 
 // Initial seed data: The 6 Fayoum events seeded with status 'published'
 const SEED_EVENTS: EventRecord[] = [
@@ -131,6 +141,7 @@ const SEED_EVENTS: EventRecord[] = [
 
 interface PersistedData {
   users: UserRecord[];
+  userRoles: UserRoleRecord[];
   events: EventRecord[];
   registrations: RegistrationRecord[];
 }
@@ -140,6 +151,7 @@ const DB_FILE = path.join(DATA_DIR, 'afaq-db.json');
 
 class DatabaseStore {
   private users: Map<string, UserRecord> = new Map();
+  private userRoles: Map<string, UserRoleRecord> = new Map();
   private events: Map<string, EventRecord> = new Map();
   private registrations: Map<string, RegistrationRecord> = new Map();
 
@@ -148,6 +160,7 @@ class DatabaseStore {
   }
 
   private load() {
+    let loaded = false;
     try {
       if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
@@ -155,6 +168,9 @@ class DatabaseStore {
 
         if (Array.isArray(parsed.users)) {
           for (const u of parsed.users) this.users.set(u.id, u);
+        }
+        if (Array.isArray(parsed.userRoles)) {
+          for (const r of parsed.userRoles) this.userRoles.set(r.userId, r);
         }
         if (Array.isArray(parsed.events) && parsed.events.length > 0) {
           for (const e of parsed.events) this.events.set(e.id, e);
@@ -164,14 +180,37 @@ class DatabaseStore {
         if (Array.isArray(parsed.registrations)) {
           for (const r of parsed.registrations) this.registrations.set(r.id, r);
         }
-        return;
+        loaded = true;
       }
     } catch (err) {
       console.warn('Failed to load persisted DB, initializing fresh store:', err);
     }
 
-    this.seedEvents();
-    this.save();
+    if (!loaded) {
+      this.seedEvents();
+    }
+
+    // Ensure every existing user has a role row, and ensure the approved initial admin email has 'admin' role
+    let roleChanged = false;
+    for (const u of this.users.values()) {
+      const isInitialAdmin = u.email.toLowerCase() === INITIAL_ADMIN_EMAIL.toLowerCase();
+      const existingRole = this.userRoles.get(u.id);
+      if (!existingRole) {
+        this.userRoles.set(u.id, {
+          userId: u.id,
+          role: isInitialAdmin ? 'admin' : 'user',
+          createdAt: new Date().toISOString(),
+        });
+        roleChanged = true;
+      } else if (isInitialAdmin && existingRole.role !== 'admin') {
+        existingRole.role = 'admin';
+        roleChanged = true;
+      }
+    }
+
+    if (!loaded || roleChanged) {
+      this.save();
+    }
   }
 
   private seedEvents() {
@@ -187,6 +226,7 @@ class DatabaseStore {
       }
       const payload: PersistedData = {
         users: Array.from(this.users.values()),
+        userRoles: Array.from(this.userRoles.values()),
         events: Array.from(this.events.values()),
         registrations: Array.from(this.registrations.values()),
       };
@@ -196,7 +236,7 @@ class DatabaseStore {
     }
   }
 
-  // --- USERS TABLE QUERIES ---
+  // --- USERS & USER_ROLES TABLE QUERIES ---
   getUserById(id: string): UserRecord | undefined {
     return this.users.get(id);
   }
@@ -210,37 +250,68 @@ class DatabaseStore {
     return undefined;
   }
 
-  createOrUpdateUser(user: { id: string; name: string; email: string }): UserRecord {
+  createOrUpdateUser(user: {
+    id: string;
+    name: string;
+    email: string;
+    emailVerified?: boolean;
+  }): UserRecord {
     const existing = this.users.get(user.id);
+    let dirty = false;
+
     if (existing) {
-      let changed = false;
       if (user.name && existing.name !== user.name) {
         existing.name = user.name;
-        changed = true;
+        dirty = true;
       }
       if (user.email && existing.email !== user.email) {
         existing.email = user.email;
-        changed = true;
+        dirty = true;
       }
-      if (changed) this.save();
-      return existing;
+    } else {
+      const newUser: UserRecord = {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        createdAt: new Date().toISOString(),
+      };
+      this.users.set(user.id, newUser);
+      dirty = true;
     }
 
-    const newUser: UserRecord = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      createdAt: new Date().toISOString(),
-    };
-    this.users.set(user.id, newUser);
-    this.save();
-    return newUser;
+    // Ensure role record exists in user_roles table (default 'user', or 'admin' for initial verified admin email)
+    const isInitialAdmin =
+      user.emailVerified !== false &&
+      user.email.toLowerCase() === INITIAL_ADMIN_EMAIL.toLowerCase();
+
+    const existingRole = this.userRoles.get(user.id);
+    if (!existingRole) {
+      this.userRoles.set(user.id, {
+        userId: user.id,
+        role: isInitialAdmin ? 'admin' : 'user',
+        createdAt: new Date().toISOString(),
+      });
+      dirty = true;
+    } else if (isInitialAdmin && existingRole.role !== 'admin') {
+      existingRole.role = 'admin';
+      dirty = true;
+    }
+
+    if (dirty) {
+      this.save();
+    }
+
+    return this.users.get(user.id)!;
+  }
+
+  /**
+   * Server-side only role lookup from `user_roles` table.
+   */
+  getUserRole(userId: string): AppRole {
+    return this.userRoles.get(userId)?.role ?? 'user';
   }
 
   // --- EVENTS TABLE QUERIES ---
-  /**
-   * Only returns published events for public visitors (Business Rule: Visitors see only published events)
-   */
   getPublishedEvents(filters?: {
     category?: string;
     organizer?: string;
@@ -293,6 +364,40 @@ class DatabaseStore {
     return Array.from(organizers).sort();
   }
 
+  // --- ADMIN EVENTS & REGISTRATIONS QUERIES ---
+  getAllEventsForAdmin(): EventRecord[] {
+    return Array.from(this.events.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+  }
+
+  createEvent(data: Omit<EventRecord, 'id' | 'createdAt'>): EventRecord {
+    const id = `ev-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const newEvent: EventRecord = {
+      ...data,
+      id,
+      createdAt: new Date().toISOString(),
+    };
+    this.events.set(id, newEvent);
+    this.save();
+    return newEvent;
+  }
+
+  updateEvent(id: string, patch: Partial<Omit<EventRecord, 'id' | 'createdAt'>>): EventRecord | null {
+    const existing = this.events.get(id);
+    if (!existing) return null;
+
+    const updated: EventRecord = {
+      ...existing,
+      ...patch,
+      id: existing.id,
+      createdAt: existing.createdAt,
+    };
+    this.events.set(id, updated);
+    this.save();
+    return updated;
+  }
+
   /**
    * Cascade Delete: Deleting an event deletes all associated registrations for good.
    */
@@ -311,10 +416,23 @@ class DatabaseStore {
     return true;
   }
 
+  getAllRegistrationsForAdmin(): Array<
+    RegistrationRecord & { user?: UserRecord; event?: EventRecord }
+  > {
+    const results: Array<RegistrationRecord & { user?: UserRecord; event?: EventRecord }> = [];
+    for (const reg of this.registrations.values()) {
+      results.push({
+        ...reg,
+        user: this.users.get(reg.userId),
+        event: this.events.get(reg.eventId),
+      });
+    }
+    return results.sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+  }
+
   // --- REGISTRATIONS TABLE QUERIES ---
-  /**
-   * User sees only their own registrations, sorted by nearest event startsAt first (الأقرب أولًا)
-   */
   getUserRegistrations(userId: string): Array<RegistrationRecord & { event: EventRecord }> {
     const results: Array<RegistrationRecord & { event: EventRecord }> = [];
 
@@ -327,15 +445,11 @@ class DatabaseStore {
       }
     }
 
-    // Sort nearest upcoming event first (ascending by event.startsAt)
     return results.sort(
       (a, b) => new Date(a.event.startsAt).getTime() - new Date(b.event.startsAt).getTime()
     );
   }
 
-  /**
-   * Creates a registration with UNIQUE(userId, eventId) constraint check
-   */
   createRegistration(
     userId: string,
     eventId: string
@@ -345,14 +459,12 @@ class DatabaseStore {
       return { success: false, error: 'الفعالية غير موجودة أو غير متاحة للتسجيل حالياً' };
     }
 
-    // Enforce UNIQUE(userId, eventId) constraint
     for (const reg of this.registrations.values()) {
       if (reg.userId === userId && reg.eventId === eventId) {
         return { success: false, error: 'أنت مسجّل بالفعل في هذه الفعالية ولا يمكن التسجيل مرتين.' };
       }
     }
 
-    // Check remaining seats if tracked
     if (
       event.seatsTotal !== undefined &&
       event.seatsTaken !== undefined &&
@@ -379,9 +491,6 @@ class DatabaseStore {
     return { success: true, registration: newReg };
   }
 
-  /**
-   * Cancels a user's registration by registrationId (strictly checks ownership)
-   */
   cancelRegistration(
     userId: string,
     registrationId: string

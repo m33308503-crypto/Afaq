@@ -10,6 +10,9 @@ import { EventsPage } from './pages/EventsPage';
 import { EventDetailsPage } from './pages/EventDetailsPage';
 import { LoginPage } from './pages/LoginPage';
 import { MyRegistrationsPage } from './pages/MyRegistrationsPage';
+import { UnauthorizedPage } from './pages/UnauthorizedPage';
+import { AdminLayout, AdminSection } from './components/admin/AdminLayout';
+import { AdminSectionPlaceholder } from './pages/admin/AdminSectionPlaceholder';
 import { RegistrationConfirmModal } from './components/RegistrationConfirmModal';
 import { MOCK_EVENTS } from './data/mockEvents';
 import { EventItem, RegistrationWithEvent } from './types';
@@ -19,6 +22,7 @@ import {
   fetchMyRegistrations,
   registerForEvent,
   cancelRegistration,
+  checkAdminAccess,
 } from './lib/api';
 
 type RouteState =
@@ -26,7 +30,8 @@ type RouteState =
   | { page: 'events' }
   | { page: 'event-details'; eventId: string }
   | { page: 'login' }
-  | { page: 'my-registrations' };
+  | { page: 'my-registrations' }
+  | { page: 'admin'; section: AdminSection };
 
 function AppContent() {
   const { user, loading: authLoading, logout, getIdToken } = useAuth();
@@ -44,6 +49,11 @@ function AppContent() {
   const [registrationsLoading, setRegistrationsLoading] = useState(false);
   const [registrationsError, setRegistrationsError] = useState<string | null>(null);
   const [justRegisteredEventId, setJustRegisteredEventId] = useState<string | null>(null);
+
+  // Ephemeral admin route access verification state (never persisted in browser)
+  const [adminCheckStatus, setAdminCheckStatus] = useState<
+    'idle' | 'checking' | 'authorized' | 'denied'
+  >('idle');
 
   // Filter & Search states (shared and preserved across navigation)
   const [searchQuery, setSearchQuery] = useState('');
@@ -131,6 +141,15 @@ function AppContent() {
       setCurrentRoute({ page: 'login' });
     } else if (pathname === '/my-registrations') {
       setCurrentRoute({ page: 'my-registrations' });
+    } else if (pathname === '/admin' || pathname.startsWith('/admin/')) {
+      const normalized = pathname.replace(/\/+$/, '');
+      let section: AdminSection = 'dashboard';
+      if (normalized === '/admin/events') {
+        section = 'events';
+      } else if (normalized === '/admin/registrations') {
+        section = 'registrations';
+      }
+      setCurrentRoute({ page: 'admin', section });
     } else if (pathname.startsWith('/events/')) {
       const id = pathname.replace('/events/', '').trim();
       setCurrentRoute({ page: 'event-details', eventId: id });
@@ -158,6 +177,47 @@ function AppContent() {
       setCurrentRoute({ page: 'login' });
     }
   }, [authLoading, currentRoute.page, user]);
+
+  // Server-verified Route Guard for /admin/*
+  useEffect(() => {
+    if (currentRoute.page !== 'admin') {
+      setAdminCheckStatus('idle');
+      return;
+    }
+
+    if (authLoading) {
+      setAdminCheckStatus('checking');
+      return;
+    }
+
+    if (!user) {
+      setAdminCheckStatus('denied');
+      return;
+    }
+
+    let cancelled = false;
+    setAdminCheckStatus('checking');
+
+    (async () => {
+      try {
+        const token = await getIdToken();
+        if (!token) {
+          if (!cancelled) setAdminCheckStatus('denied');
+          return;
+        }
+        const isAllowed = await checkAdminAccess(token);
+        if (!cancelled) {
+          setAdminCheckStatus(isAllowed ? 'authorized' : 'denied');
+        }
+      } catch {
+        if (!cancelled) setAdminCheckStatus('denied');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentRoute.page, authLoading, user, getIdToken]);
 
   // Load active event when on event-details page
   useEffect(() => {
@@ -327,11 +387,27 @@ function AppContent() {
     [getIdToken, loadMyRegistrations, loadEvents]
   );
 
+  const navigateToAdminSection = useCallback(
+    (section: AdminSection) => {
+      const path =
+        section === 'dashboard'
+          ? '/admin'
+          : section === 'events'
+          ? '/admin/events'
+          : '/admin/registrations';
+      updateUrl(path);
+      setCurrentRoute({ page: 'admin', section });
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [updateUrl]
+  );
+
   const handleLogout = useCallback(async () => {
     await logout();
     setMyRegistrations([]);
     setJustRegisteredEventId(null);
-    if (currentRoute.page === 'my-registrations') {
+    setAdminCheckStatus('idle');
+    if (currentRoute.page === 'my-registrations' || currentRoute.page === 'admin') {
       navigateToHome();
     }
   }, [logout, currentRoute.page, navigateToHome]);
@@ -354,6 +430,26 @@ function AppContent() {
       : currentRoute.page === 'login'
       ? 'login'
       : 'events';
+
+  const adminSectionTitleMap: Record<AdminSection, string> = {
+    dashboard: 'لوحة التحكم',
+    events: 'الفعاليات',
+    registrations: 'التسجيلات',
+  };
+
+  if (currentRoute.page === 'admin' && adminCheckStatus === 'authorized' && user) {
+    return (
+      <AdminLayout
+        activeSection={currentRoute.section}
+        userName={user.name || user.email}
+        onNavigateSection={navigateToAdminSection}
+        onNavigatePublicHome={navigateToHome}
+        onLogout={handleLogout}
+      >
+        <AdminSectionPlaceholder title={adminSectionTitleMap[currentRoute.section]} />
+      </AdminLayout>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-white text-slate-900 selection:bg-[#20C5C2]/20 selection:text-[#123B5D]">
@@ -490,6 +586,27 @@ function AppContent() {
             onCancelRegistration={handleCancelRegistration}
           />
         )}
+
+        {/* Page 6: /admin/* Guard (Loading or Unauthorized) */}
+        {currentRoute.page === 'admin' &&
+          (authLoading || adminCheckStatus === 'idle' || adminCheckStatus === 'checking') && (
+            <div className="py-24 flex items-center justify-center">
+              <div className="text-center space-y-3">
+                <div className="w-8 h-8 border-2 border-[#123B5D] border-t-transparent rounded-full animate-spin mx-auto" />
+                <p className="text-sm font-ui text-slate-600">جارٍ التحقق من الصلاحيات...</p>
+              </div>
+            </div>
+          )}
+
+        {currentRoute.page === 'admin' &&
+          !authLoading &&
+          adminCheckStatus === 'denied' && (
+            <UnauthorizedPage
+              isLoggedIn={Boolean(user)}
+              onGoHome={navigateToHome}
+              onGoToLogin={() => navigateToLogin(window.location.pathname)}
+            />
+          )}
       </main>
 
       {/* Footer */}
