@@ -1,0 +1,6 @@
+{
+  "name": "آفاق | منصة فعاليات وورش شباب الفيوم",
+  "description": "منصة آفاق (AFAQ) لاكتشاف الفعاليات والورش والدورات التدريبية والتسجيل فيها لشباب الفيوم.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
